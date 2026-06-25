@@ -9,75 +9,23 @@
 <body>
   <div id="game-wrapper">
     <div id="hud">
-      <div class="hud-left">
-        <div class="hud-item">
-          <span class="hud-label">Wave</span>
-          <span class="hud-value" id="hud-wave">1</span>
-        </div>
-        <div class="hud-item">
-          <span class="hud-label">Colossi</span>
-          <span class="hud-value" id="hud-colossi">0</span>
-        </div>
-        <div class="hud-item">
-          <span class="hud-label">Slain</span>
-          <span class="hud-value" id="hud-kills">0</span>
-        </div>
+      <div id="hud-lives">♥♥♥</div>
+      <div id="hud-score-wrap">
+        <span class="hud-label">Score</span>
+        <span id="hud-score">0</span>
       </div>
-      <div class="hud-right">
-        <div class="hud-item">
-          <span class="hud-label">Points</span>
-          <span class="hud-value" id="hud-points">0</span>
-        </div>
-        <div class="hud-item">
-          <span class="hud-label">Wall</span>
-          <span class="hud-value" id="hud-wall">100%</span>
-        </div>
+      <div id="hud-speed-wrap">
+        <span class="hud-label">Speed</span>
+        <div id="hud-speed-bar"><div id="hud-speed-fill"></div></div>
       </div>
     </div>
+
     <canvas id="canvas" width="900" height="600"></canvas>
-    <div id="wall-health-bar">
-      <div id="wall-health-fill" style="width:100%"></div>
-    </div>
 
-    <!-- Upgrade panel (shown between waves) -->
-    <div id="upgrade-panel">
-      <h2>Between Waves</h2>
-      <div class="wave-label" id="upg-wave-label">Wave 1 Complete</div>
-      <div class="points-display">Available Points: <span id="upg-points">0</span></div>
-      <div class="upgrade-grid">
-        <button class="upgrade-btn" id="upg-grapple">
-          <span class="upg-level" id="upg-grapple-level">Lv 0</span>
-          <span class="upg-name">Grapple Speed</span>
-          <span class="upg-desc">Faster line launch &amp; wider swing arc</span>
-          <span class="upg-cost">Cost: <span class="upg-cost-val" id="cost-grapple">20</span> pts</span>
-        </button>
-        <button class="upgrade-btn" id="upg-blade">
-          <span class="upg-level" id="upg-blade-level">Lv 0</span>
-          <span class="upg-name">Blade Power</span>
-          <span class="upg-desc">Larger weak-point hit radius</span>
-          <span class="upg-cost">Cost: <span class="upg-cost-val" id="cost-blade">20</span> pts</span>
-        </button>
-        <button class="upgrade-btn" id="upg-cannon">
-          <span class="upg-level" id="upg-cannon-level">Lv 0</span>
-          <span class="upg-name">Cannon Power</span>
-          <span class="upg-desc">Wall cannons deal more chip damage</span>
-          <span class="upg-cost">Cost: <span class="upg-cost-val" id="cost-cannon">25</span> pts</span>
-        </button>
-        <button class="upgrade-btn" id="upg-wall">
-          <span class="upg-level" id="upg-wall-level">Lv 0</span>
-          <span class="upg-name">Wall Repair</span>
-          <span class="upg-desc">Restore 25% wall integrity</span>
-          <span class="upg-cost">Cost: <span class="upg-cost-val" id="cost-wall">30</span> pts</span>
-        </button>
-      </div>
-      <button id="deploy-btn">Deploy — Next Wave</button>
-    </div>
-
-    <!-- Game over / title overlay -->
     <div id="overlay">
-      <h1 id="overlay-title" class="color-red">Wall Breached</h1>
-      <div class="sub" id="overlay-sub">The Colossi have broken through.</div>
-      <button class="restart-btn" id="restart-btn">Begin Again</button>
+      <h1 id="overlay-title">Colossus Break</h1>
+      <p id="overlay-sub"></p>
+      <button id="restart-btn">Begin</button>
     </div>
   </div>
 

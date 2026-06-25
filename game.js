@@ -1,264 +1,159 @@
-// ─────────────────────────────────────────────
-//  Colossus Break — game.js
-// ─────────────────────────────────────────────
+// ─── Colossus Break — auto-runner ───────────────────────
 
 const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const W = canvas.width;
-const H = canvas.height;
+const ctx    = canvas.getContext('2d');
+const W = canvas.width;   // 900
+const H = canvas.height;  // 600
 
-// ── Constants ────────────────────────────────
-const GRAVITY = 0.45;
-const ROPE_LEN_MAX = 260;
-const PLAYER_RADIUS = 8;
-const SLASH_RADIUS_BASE = 28;
-const GROUND_Y = H - 80;       // top of wall base
-const WALL_TOP_Y = H - 110;    // battlements top
-const WALL_X = W * 0.72;       // right wall inner face
+// ── Constants ────────────────────────────────────────────
+const GRAVITY      = 0.52;
+const GROUND_Y     = H - 68;
+const ROPE_MAX     = 420;
+const PLAYER_R     = 10;
+const SLASH_R      = 90;
+const SPEED_BASE   = 2.6;
+const SPEED_MAX    = 7.0;
+const START_X      = 210;
 
-// Anchor points (rooftops / battlements)
-const ANCHORS = [
-  { x: 80,  y: 260 },
-  { x: 200, y: 200 },
-  { x: 330, y: 240 },
-  { x: 460, y: 190 },
-  { x: 590, y: 220 },
-  { x: 680, y: WALL_TOP_Y - 10 },
-  { x: 750, y: WALL_TOP_Y - 30 },
-  { x: 820, y: WALL_TOP_Y - 10 },
-  { x: 120, y: 360 },
-  { x: 400, y: 340 },
-  { x: 540, y: 320 },
-];
-
-// ── Upgrade state ─────────────────────────────
-const upgrades = {
-  grapple: 0,   // max 4
-  blade:   0,   // max 4
-  cannon:  0,   // max 4
-  wall:    0,   // max 4 (repairs only)
-};
-
-const UPGRADE_COSTS = {
-  grapple: [20, 30, 45, 60],
-  blade:   [20, 30, 45, 60],
-  cannon:  [25, 35, 50, 70],
-  wall:    [30, 40, 55, 75],
-};
-
-function grappleSpeed()   { return 8 + upgrades.grapple * 2; }
-function slashRadius()    { return SLASH_RADIUS_BASE + upgrades.blade * 8; }
-function cannonDamage()   { return 2 + upgrades.cannon * 2; }
-
-// ── Mouse ─────────────────────────────────────
+// ── Mouse ────────────────────────────────────────────────
 const mouse = { x: 0, y: 0 };
 canvas.addEventListener('mousemove', e => {
-  const rect = canvas.getBoundingClientRect();
-  mouse.x = (e.clientX - rect.left) * (W / rect.width);
-  mouse.y = (e.clientY - rect.top)  * (H / rect.height);
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * (W / r.width);
+  mouse.y = (e.clientY - r.top)  * (H / r.height);
 });
 
-// ── Game state ────────────────────────────────
-let state = 'title';  // title | playing | upgrade | gameover
-let hintTimer = 360;  // frames to show in-game hints
-let wave  = 0;
-let kills = 0;
-let points = 0;
-let wallHP = 100;
-let totalColossiThisWave = 0;
+// ── State ────────────────────────────────────────────────
+let state;       // 'title' | 'playing' | 'gameover'
+let score;
+let lives;
+let speed;
+let frameCount;
+let nextTitanIn; // world-px until next titan spawn
+let screenShake;
 
-// ── Player ────────────────────────────────────
+// ── World objects ────────────────────────────────────────
+let anchors;    // { x, y, obj-ref kept in player.anchorRef }
+let titans;     // { x, y, w, h, wpY, dead, hitFlash }
+let particles;  // { x, y, vx, vy, life, maxLife, r, color }
+
+// ── Player ───────────────────────────────────────────────
 const player = {
-  x: 420, y: 300,
-  vx: 0,  vy: 0,
+  x: START_X, y: GROUND_Y - PLAYER_R,
+  vx: 0, vy: 0,
   grounded: false,
   grappling: false,
+  anchorRef: null,  // reference to anchor object
   anchorX: 0, anchorY: 0,
   ropeLen: 0,
   slashing: false,
   slashTimer: 0,
-  dead: false,
+  slashHit: new Set(),
 };
 
-// ── Colossi ───────────────────────────────────
-let colossi = [];
-
-// ── Projectiles (cannon shots) ────────────────
-let cannonBalls = [];
-
-// ── Visual effects ────────────────────────────
-let particles = [];
-let screenShake = 0;
-
-// ── Cannons on the wall ───────────────────────
-const CANNONS = [
-  { x: WALL_X + 20, y: WALL_TOP_Y + 10, cooldown: 0, maxCooldown: 140 },
-  { x: WALL_X + 20, y: WALL_TOP_Y + 50, cooldown: 70, maxCooldown: 140 },
-];
-
-// ─────────────────────────────────────────────
-//  Colossus factory
-// ─────────────────────────────────────────────
-function createColossus(spawnIndex) {
-  const scaleFactor = 1 + wave * 0.12;
-  const h = (180 + Math.random() * 80) * Math.min(scaleFactor, 2.2);
-  const w = h * 0.52;
-  const speed = (0.28 + wave * 0.04) * (0.85 + Math.random() * 0.3);
-  const maxHP = Math.floor((60 + wave * 20) * scaleFactor);
-
-  // Weak-point position relative to colossus origin (top-center of body)
-  const wpOffsetX = (Math.random() - 0.5) * w * 0.5;
-  const wpOffsetY = h * (0.15 + Math.random() * 0.25);
-
-  return {
-    x: -w - spawnIndex * 60,
-    y: GROUND_Y - h,
-    w, h, speed,
-    hp: maxHP, maxHP,
-    dead: false,
-    reachedWall: false,
-    breachTimer: 0,
-    wpOffX: wpOffsetX,
-    wpOffY: wpOffsetY,
-    wpGlow: 0,
-    hitFlash: 0,
-  };
-}
-
-// ─────────────────────────────────────────────
-//  Wave spawning
-// ─────────────────────────────────────────────
-function startWave() {
-  wave++;
-  const count = 2 + Math.floor(wave * 1.2);
-  totalColossiThisWave = count;
-  colossi = [];
-  for (let i = 0; i < count; i++) {
-    colossi.push(createColossus(i));
-  }
-  cannonBalls = [];
-  particles = [];
-  state = 'playing';
-  updateHUD();
-}
-
-// ─────────────────────────────────────────────
-//  Input
-// ─────────────────────────────────────────────
+// ── Input ────────────────────────────────────────────────
 const keys = {};
-window.addEventListener('keydown', e => { keys[e.code] = true; });
-window.addEventListener('keyup',   e => { keys[e.code] = false; });
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') { e.preventDefault(); triggerSlash(); }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
 
 canvas.addEventListener('mousedown', e => {
-  if (state !== 'playing' || e.button !== 0) return;
-  // Find anchor nearest to mouse cursor that the player can reach
-  let best = null, bestDistToMouse = Infinity;
-  for (const a of ANCHORS) {
-    if (dist(player.x, player.y, a.x, a.y) > ROPE_LEN_MAX) continue;
-    const d = dist(mouse.x, mouse.y, a.x, a.y);
-    if (d < bestDistToMouse) { bestDistToMouse = d; best = a; }
+  if (e.button !== 0 || state !== 'playing') return;
+  if (player.grappling) return;
+
+  let best = null, bestMouseDist = Infinity;
+  for (const a of anchors) {
+    if (dist(player.x, player.y, a.x, a.y) > ROPE_MAX) continue;
+    const md = dist(mouse.x, mouse.y, a.x, a.y);
+    if (md < bestMouseDist) { bestMouseDist = md; best = a; }
   }
   if (best) {
     player.grappling = true;
-    player.anchorX = best.x;
-    player.anchorY = best.y;
-    const d = dist(player.x, player.y, best.x, best.y);
-    player.ropeLen = Math.max(60, d);
-    if (Math.abs(player.vx) < 1 && Math.abs(player.vy) < 1) {
-      player.vx = -3; player.vy = -2;
-    }
+    player.anchorRef = best;
+    player.anchorX   = best.x;
+    player.anchorY   = best.y;
+    player.ropeLen   = Math.max(60, dist(player.x, player.y, best.x, best.y));
+    // Kick toward anchor so the swing starts immediately
+    const kdx = best.x - player.x, kdy = best.y - player.y;
+    const kl  = Math.sqrt(kdx * kdx + kdy * kdy) || 1;
+    player.vx += (kdx / kl) * 3;
+    player.vy += (kdy / kl) * 3 - 1; // slight upward bias
   }
 });
 
-canvas.addEventListener('mouseup', e => {
-  if (e.button === 0) releaseGrapple();
-});
-
+canvas.addEventListener('mouseup',     e => { if (e.button === 0) releaseGrapple(); });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-window.addEventListener('keydown', e => {
-  if (e.code === 'Space' && state === 'playing') {
-    e.preventDefault();
-    triggerSlash();
-  }
-});
-
 function releaseGrapple() {
-  if (!player.grappling) return;
   player.grappling = false;
-  // vx/vy already correct — no conversion needed with constraint model
+  player.anchorRef = null;
 }
 
+// ── Slash ────────────────────────────────────────────────
 function triggerSlash() {
-  if (player.slashing) return;
-  player.slashing = true;
-  player.slashTimer = 18;
-  checkSlashHit();
+  if (state !== 'playing' || player.slashing) return;
+  player.slashing   = true;
+  player.slashTimer = 16;
+  player.slashHit   = new Set(); // track who we already hit this slash
 }
 
-// ─────────────────────────────────────────────
-//  Slash hit detection
-// ─────────────────────────────────────────────
-function checkSlashHit() {
-  const r = slashRadius();
-  for (const c of colossi) {
-    if (c.dead) continue;
-    const wpX = c.x + c.w / 2 + c.wpOffX;
-    const wpY = c.y + c.wpOffY;
-    if (dist(player.x, player.y, wpX, wpY) < r + 14) {
-      killColossus(c);
-    }
-  }
-}
-
-function killColossus(c) {
-  c.dead = true;
-  kills++;
-  points += 10 + wave * 5;
-  screenShake = 18;
-  spawnParticles(c.x + c.w / 2, c.y + c.h / 2, 40, '#f0c060', '#e04030');
+function killTitan(t) {
+  t.dead = true;
+  score += 10;
+  screenShake = 12;
+  spawnParticles(t.x + t.w / 2, t.wpY, 28, '#f0c060', '#e04030');
   updateHUD();
 }
 
-// ─────────────────────────────────────────────
-//  Physics update
-// ─────────────────────────────────────────────
+// ── Player physics ───────────────────────────────────────
 function updatePlayer(dt) {
-  if (player.dead) return;
-
   if (player.grappling) {
-    updateSwing(dt);
-  } else {
-    updateFreeFlight(dt);
+    // Keep anchorX/Y in sync with the moving anchor object
+    if (player.anchorRef) {
+      player.anchorX = player.anchorRef.x;
+      player.anchorY = player.anchorRef.y;
+    }
+    // Release if anchor scrolled off left edge
+    if (player.anchorX < -40) { releaseGrapple(); }
+    else                        { updateSwing(dt); }
   }
 
-  // Slash timer
+  if (!player.grappling) updateFlight(dt);
+
   if (player.slashing) {
     player.slashTimer -= dt * 60;
+    // Check hits every frame so timing window = full animation, not just keypress moment
+    for (const t of titans) {
+      if (t.dead || player.slashHit.has(t)) continue;
+      if (dist(player.x, player.y, t.x + t.w / 2, t.wpY) < SLASH_R) {
+        player.slashHit.add(t);
+        killTitan(t);
+      }
+    }
     if (player.slashTimer <= 0) player.slashing = false;
   }
 
+  // Soft left wall — nudge player right instead of killing them
+  if (player.x < 50) { player.x = 50; player.vx = Math.max(player.vx, 1); }
 }
 
 function updateSwing(dt) {
-  // Reel in / out with W/S (optional, not required)
-  if (keys['KeyW'] || keys['ArrowUp'])   player.ropeLen = Math.max(40,          player.ropeLen - grappleSpeed() * dt * 60);
-  if (keys['KeyS'] || keys['ArrowDown']) player.ropeLen = Math.min(ROPE_LEN_MAX, player.ropeLen + 5 * dt * 60);
-
-  // Mouse steers the swing — apply force toward cursor
-  const tmx = mouse.x - player.x;
-  const tmy = mouse.y - player.y;
-  const tmLen = Math.sqrt(tmx * tmx + tmy * tmy);
-  if (tmLen > 5) {
-    const strength = 1.4;
-    player.vx += (tmx / tmLen) * strength * dt * 60;
-    player.vy += (tmy / tmLen) * strength * dt * 60;
+  // Force toward mouse cursor — same direction as before, just calmer
+  const mx = mouse.x - player.x, my = mouse.y - player.y;
+  const ml = Math.sqrt(mx * mx + my * my);
+  if (ml > 5) {
+    player.vx += (mx / ml) * 0.85 * dt * 60;
+    player.vy += (my / ml) * 0.85 * dt * 60;
   }
 
-  // Gravity
   player.vy += GRAVITY * dt * 60;
 
-  // Move
+  // Speed cap
+  const spd = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+  if (spd > 13) { player.vx = player.vx / spd * 13; player.vy = player.vy / spd * 13; }
+
   player.x += player.vx * dt * 60;
   player.y += player.vy * dt * 60;
 
@@ -270,549 +165,371 @@ function updateSwing(dt) {
     const nx = dx / d, ny = dy / d;
     player.x = player.anchorX + nx * player.ropeLen;
     player.y = player.anchorY + ny * player.ropeLen;
-    const vDotN = player.vx * nx + player.vy * ny;
-    if (vDotN > 0) {
-      player.vx -= vDotN * nx;
-      player.vy -= vDotN * ny;
-    }
+    const vd = player.vx * nx + player.vy * ny;
+    if (vd > 0) { player.vx -= vd * nx; player.vy -= vd * ny; }
   }
 
-  // Ground
-  if (player.y >= GROUND_Y - PLAYER_RADIUS) {
-    player.y = GROUND_Y - PLAYER_RADIUS;
-    releaseGrapple();
-    player.vy = 0;
-    player.grounded = true;
-  }
-
-  player.x = Math.max(10, Math.min(W - 10, player.x));
+  groundCheck();
+  player.x = Math.min(player.x, W - 10);
 }
 
-function updateFreeFlight(dt) {
-  const wasGrounded = player.grounded;
-
-  if (wasGrounded) {
-    // Snappy ground walk
-    if      (keys['KeyA'] || keys['ArrowLeft'])  player.vx = -5;
-    else if (keys['KeyD'] || keys['ArrowRight']) player.vx =  5;
-    else player.vx *= Math.pow(0.6, dt * 60); // friction when idle
-  } else {
-    // Air steering (softer)
-    if (keys['KeyA'] || keys['ArrowLeft'])  player.vx -= 0.4 * dt * 60;
-    if (keys['KeyD'] || keys['ArrowRight']) player.vx += 0.4 * dt * 60;
-    player.vx *= Math.pow(0.97, dt * 60);
-  }
-
+function updateFlight(dt) {
+  if (keys['KeyA'] || keys['ArrowLeft'])  player.vx -= 0.4 * dt * 60;
+  if (keys['KeyD'] || keys['ArrowRight']) player.vx += 0.4 * dt * 60;
+  player.vx *= Math.pow(0.985, dt * 60);
   player.vy += GRAVITY * dt * 60;
-  player.x += player.vx * dt * 60;
-  player.y += player.vy * dt * 60;
+  player.x  += player.vx * dt * 60;
+  player.y  += player.vy * dt * 60;
+  groundCheck();
+  player.x = Math.max(20, Math.min(W - 10, player.x));
+}
 
+function groundCheck() {
   player.grounded = false;
-  if (player.y >= GROUND_Y - PLAYER_RADIUS) {
-    player.y = GROUND_Y - PLAYER_RADIUS;
+  if (player.y >= GROUND_Y - PLAYER_R) {
+    player.y = GROUND_Y - PLAYER_R;
     if (player.vy > 0) player.vy = 0;
     player.grounded = true;
+    if (player.grappling) releaseGrapple();
   }
-
-  player.x = Math.max(10, Math.min(W - 10, player.x));
-  if (player.y < 10) { player.y = 10; player.vy = 0; }
+  if (player.y < 0) { player.y = 0; player.vy = 0; }
 }
 
-// ─────────────────────────────────────────────
-//  Colossi update
-// ─────────────────────────────────────────────
-function updateColossi(dt) {
-  let allDead = true;
+// ── World scroll & spawning ───────────────────────────────
+function updateWorld(dt) {
+  speed = Math.min(SPEED_MAX, SPEED_BASE + frameCount * 0.00055);
+  const scroll = speed * dt * 60;
 
-  for (const c of colossi) {
-    if (c.dead) continue;
-    allDead = false;
+  // Move objects left
+  for (const a of anchors)  a.x -= scroll;
+  for (const t of titans) { t.x -= scroll; t.walkPhase += dt * 4.5; }
 
-    c.wpGlow = (Math.sin(Date.now() / 200) * 0.4 + 0.6);
-    if (c.hitFlash > 0) c.hitFlash -= dt * 60;
+  // Remove anchors off left edge
+  for (let i = anchors.length - 1; i >= 0; i--) {
+    if (anchors[i].x < -60) anchors.splice(i, 1);
+  }
 
-    if (!c.reachedWall) {
-      c.x += c.speed * dt * 60;
-      if (c.x + c.w >= WALL_X - 10) {
-        c.reachedWall = true;
-        c.x = WALL_X - c.w - 10;
-      }
-    } else {
-      // Pound the wall
-      c.breachTimer += dt * 60;
-      if (c.breachTimer >= 120) {
-        c.breachTimer = 0;
-        wallHP -= 4 + wave;
-        screenShake = 10;
-        wallHP = Math.max(0, wallHP);
-        updateHUD();
-        if (wallHP <= 0) {
-          triggerGameOver();
-          return;
-        }
-      }
-    }
-
-    // Cannon chip damage
-    for (let i = cannonBalls.length - 1; i >= 0; i--) {
-      const b = cannonBalls[i];
-      const wpX = c.x + c.w / 2 + c.wpOffX;
-      const wpY = c.y + c.wpOffY;
-      if (dist(b.x, b.y, c.x + c.w / 2, c.y + c.h / 2) < c.w / 2 + 6) {
-        c.hp -= cannonDamage();
-        c.hitFlash = 6;
-        cannonBalls.splice(i, 1);
-        if (c.hp <= 0 && !c.dead) {
-          // Cannons can't finish — just stagger
-          c.hp = 1;
-        }
-      }
+  // Titans off left edge → lose a life
+  for (let i = titans.length - 1; i >= 0; i--) {
+    const t = titans[i];
+    if (t.hitFlash > 0) t.hitFlash -= dt * 60;
+    if (t.x + t.w < -10) {
+      if (!t.dead) loseLife();
+      titans.splice(i, 1);
     }
   }
 
-  if (allDead && state === 'playing') {
-    startUpgradePhase();
+  // Guarantee 2 anchors are always within grapple range ahead of the player
+  const reachable = anchors.filter(a => a.x > player.x - 50 && a.x < player.x + ROPE_MAX + 60);
+  if (reachable.length < 2) spawnAnchor();
+
+  // Titan spawn timer (counts down in world-px)
+  nextTitanIn -= scroll;
+  if (nextTitanIn <= 0) {
+    spawnTitan();
+    nextTitanIn = 420 + Math.random() * 260 - Math.min(100, frameCount * 0.02);
   }
 }
 
-// ─────────────────────────────────────────────
-//  Cannons
-// ─────────────────────────────────────────────
-function updateCannons(dt) {
-  for (const cannon of CANNONS) {
-    if (cannon.cooldown > 0) { cannon.cooldown -= dt * 60; continue; }
-    // Find nearest living colossus
-    let target = null, bestX = Infinity;
-    for (const c of colossi) {
-      if (!c.dead && c.x < bestX) { bestX = c.x; target = c; }
-    }
-    if (!target) continue;
-    cannon.cooldown = cannon.maxCooldown;
-    const tx = target.x + target.w / 2;
-    const ty = target.y + target.h / 2;
-    const d = dist(cannon.x, cannon.y, tx, ty);
-    const spd = 7;
-    cannonBalls.push({
-      x: cannon.x, y: cannon.y,
-      vx: (tx - cannon.x) / d * spd,
-      vy: (ty - cannon.y) / d * spd,
-      life: 90,
-    });
-  }
-
-  for (let i = cannonBalls.length - 1; i >= 0; i--) {
-    const b = cannonBalls[i];
-    b.x += b.vx * dt * 60;
-    b.y += b.vy * dt * 60;
-    b.life -= dt * 60;
-    if (b.life <= 0) cannonBalls.splice(i, 1);
-  }
+function spawnAnchor() {
+  // Spawn ahead of the player, within grapple range, at varied heights
+  const ahead = player.x + 180 + Math.random() * 200;
+  anchors.push({
+    x: Math.max(ahead, player.x + 150),
+    y: 110 + Math.random() * 250,
+  });
 }
 
-// ─────────────────────────────────────────────
-//  Particles
-// ─────────────────────────────────────────────
-function spawnParticles(x, y, count, colA, colB) {
-  for (let i = 0; i < count; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const spd   = 2 + Math.random() * 6;
+function spawnTitan() {
+  const h = 150 + Math.random() * 140;
+  const w = h * 0.46;
+  titans.push({
+    x: W + 30,
+    y: GROUND_Y - h,
+    w, h,
+    wpY: (GROUND_Y - h) - h * 0.07, // eye center (head extends above t.y)
+    dead: false,
+    hitFlash: 0,
+    walkPhase: Math.random() * Math.PI * 2,
+  });
+}
+
+// ── Particles ─────────────────────────────────────────────
+function spawnParticles(x, y, n, ca, cb) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 2 + Math.random() * 6;
+    const life = 0.55 + Math.random() * 0.5;
     particles.push({
       x, y,
-      vx: Math.cos(angle) * spd,
-      vy: Math.sin(angle) * spd - 3,
-      life: 0.8 + Math.random() * 0.6,
-      maxLife: 0,
-      color: Math.random() < 0.5 ? colA : colB,
-      r: 2 + Math.random() * 4,
+      vx: Math.cos(a) * s, vy: Math.sin(a) * s - 2.5,
+      life, maxLife: life,
+      r: 2 + Math.random() * 3,
+      color: Math.random() < 0.5 ? ca : cb,
     });
-    particles[particles.length - 1].maxLife = particles[particles.length - 1].life;
   }
 }
 
 function updateParticles(dt) {
+  const scroll = speed * dt * 60;
   for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
-    p.vy += 0.15 * dt * 60;
-    p.x  += p.vx * dt * 60;
+    p.vy += 0.18 * dt * 60;
+    p.x  += p.vx * dt * 60 - scroll;
     p.y  += p.vy * dt * 60;
     p.life -= dt;
     if (p.life <= 0) particles.splice(i, 1);
   }
 }
 
-// ─────────────────────────────────────────────
-//  Upgrade phase
-// ─────────────────────────────────────────────
-function startUpgradePhase() {
-  state = 'upgrade';
-  document.getElementById('upgrade-panel').style.display = 'block';
-  document.getElementById('upg-wave-label').textContent = `Wave ${wave} Complete`;
-  refreshUpgradeUI();
-}
-
-function refreshUpgradeUI() {
-  document.getElementById('upg-points').textContent = points;
-
-  const defs = [
-    { key: 'grapple', max: 4 },
-    { key: 'blade',   max: 4 },
-    { key: 'cannon',  max: 4 },
-    { key: 'wall',    max: 4 },
-  ];
-
-  for (const d of defs) {
-    const lvl = upgrades[d.key];
-    const cost = lvl < d.max ? UPGRADE_COSTS[d.key][lvl] : null;
-    const btn  = document.getElementById(`upg-${d.key}`);
-    const costEl = document.getElementById(`cost-${d.key}`);
-    document.getElementById(`upg-${d.key}-level`).textContent = d.key === 'wall' ? '' : `Lv ${lvl}`;
-
-    if (cost === null) {
-      btn.disabled = true;
-      costEl.textContent = 'MAX';
-    } else {
-      btn.disabled = points < cost;
-      costEl.textContent = cost;
-    }
-  }
-}
-
-function buyUpgrade(key) {
-  const lvl  = upgrades[key];
-  const cost = UPGRADE_COSTS[key][lvl];
-  if (points < cost) return;
-  points -= cost;
-
-  if (key === 'wall') {
-    wallHP = Math.min(100, wallHP + 25);
-    updateHUD();
-    // Wall repair doesn't level up, resets cost but costs keep going
-    upgrades[key]++;
-    if (upgrades[key] >= 4) upgrades[key] = 0; // allow repeated repair
-  } else {
-    upgrades[key]++;
-  }
-
-  refreshUpgradeUI();
-}
-
-document.getElementById('upg-grapple').addEventListener('click', () => buyUpgrade('grapple'));
-document.getElementById('upg-blade').addEventListener('click',   () => buyUpgrade('blade'));
-document.getElementById('upg-cannon').addEventListener('click',  () => buyUpgrade('cannon'));
-document.getElementById('upg-wall').addEventListener('click',    () => buyUpgrade('wall'));
-
-document.getElementById('deploy-btn').addEventListener('click', () => {
-  document.getElementById('upgrade-panel').style.display = 'none';
-  resetPlayerPosition();
-  startWave();
-});
-
-function resetPlayerPosition() {
-  player.x = 750; player.y = WALL_TOP_Y - 20;
-  player.vx = 0; player.vy = 0;
-  player.grappling = false;
-  player.grounded = false;
-  player.dead = false;
-  player.slashing = false;
-}
-
-// ─────────────────────────────────────────────
-//  Game over / title
-// ─────────────────────────────────────────────
-function triggerGameOver() {
-  state = 'gameover';
-  const ov = document.getElementById('overlay');
-  document.getElementById('overlay-title').textContent = 'Wall Breached';
-  document.getElementById('overlay-title').className = 'color-red';
-  document.getElementById('overlay-sub').textContent =
-    `Wave ${wave} — ${kills} Colossi Slain — ${points} Points`;
-  ov.classList.add('visible');
-}
-
-document.getElementById('restart-btn').addEventListener('click', resetGame);
-
-function resetGame() {
-  wave = 0; kills = 0; points = 0; wallHP = 100;
-  upgrades.grapple = 0; upgrades.blade = 0;
-  upgrades.cannon = 0;  upgrades.wall = 0;
-  colossi = []; cannonBalls = []; particles = [];
-  screenShake = 0; hintTimer = 360;
-  resetPlayerPosition();
-  document.getElementById('overlay').classList.remove('visible');
-  document.getElementById('upgrade-panel').style.display = 'none';
-  for (const c of CANNONS) c.cooldown = 0;
-  updateHUD();
-  startWave();
-}
-
-// ─────────────────────────────────────────────
-//  HUD
-// ─────────────────────────────────────────────
+// ── HUD / lives ───────────────────────────────────────────
 function updateHUD() {
-  document.getElementById('hud-wave').textContent   = wave;
-  document.getElementById('hud-colossi').textContent = colossi.filter(c => !c.dead).length;
-  document.getElementById('hud-kills').textContent  = kills;
-  document.getElementById('hud-points').textContent = points;
-  document.getElementById('hud-wall').textContent   = Math.ceil(wallHP) + '%';
-  document.getElementById('wall-health-fill').style.width = wallHP + '%';
+  document.getElementById('hud-score').textContent = score;
+  document.getElementById('hud-lives').textContent = '♥'.repeat(Math.max(0, lives));
+  const pct = Math.min(100, Math.round(((speed - SPEED_BASE) / (SPEED_MAX - SPEED_BASE)) * 100));
+  document.getElementById('hud-speed-fill').style.width = pct + '%';
 }
 
-// ─────────────────────────────────────────────
-//  Drawing
-// ─────────────────────────────────────────────
+function loseLife() {
+  if (state !== 'playing') return;
+  lives--;
+  screenShake = 22;
+  updateHUD();
+  if (lives <= 0) triggerGameOver();
+}
+
+// ── Utility ───────────────────────────────────────────────
+function dist(x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// ── Drawing ───────────────────────────────────────────────
 function draw() {
-  // Screen shake
   ctx.save();
   if (screenShake > 0) {
     ctx.translate(
-      (Math.random() - 0.5) * screenShake * 0.8,
-      (Math.random() - 0.5) * screenShake * 0.8
+      (Math.random() - 0.5) * screenShake * 0.7,
+      (Math.random() - 0.5) * screenShake * 0.7
     );
-    screenShake = Math.max(0, screenShake - 1);
+    screenShake = Math.max(0, screenShake - 1.4);
   }
-
-  // Sky gradient
-  const sky = ctx.createLinearGradient(0, 0, 0, H);
-  sky.addColorStop(0, '#0d0a18');
-  sky.addColorStop(0.6, '#1a1020');
-  sky.addColorStop(1, '#2a1808');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, W, H);
 
   drawBackground();
-  drawWall();
   drawAnchors();
-
-  if (state === 'playing' || state === 'upgrade') {
-    drawColossi();
-    drawCannonBalls();
-    drawParticles();
-    drawPlayer();
-    drawHints();
-  }
-
-  if (state === 'title') {
-    drawTitle();
-  }
+  drawTitans();
+  drawParticles();
+  if (state !== 'title') drawPlayer();
 
   ctx.restore();
 }
 
 function drawBackground() {
-  // Distant city silhouette
-  ctx.fillStyle = '#120e1c';
-  for (let i = 0; i < 12; i++) {
-    const bx = i * 75 + 10;
-    const bh = 40 + Math.sin(i * 2.3) * 30;
-    ctx.fillRect(bx, GROUND_Y - bh, 50, bh);
+  // Sky
+  const sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  sky.addColorStop(0, '#5090c8');
+  sky.addColorStop(1, '#b8d8f0');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, GROUND_Y);
+
+  // Clouds (static — move would need world coords)
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  [[100,55,65,22],[310,38,85,18],[560,60,72,20],[760,42,50,16]].forEach(([cx,cy,rw,rh]) => {
+    ctx.beginPath(); ctx.ellipse(cx, cy, rw, rh, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx+rw*0.55, cy+5, rw*0.65, rh*0.7, 0, 0, Math.PI*2); ctx.fill();
+  });
+
+  // Far buildings (parallax — shift at half speed)
+  // We fake parallax by using a static offset driven by frameCount
+  const parallax = (frameCount * speed * 0.3) % 280;
+  ctx.fillStyle = '#6a8090';
+  for (let i = 0; i < 5; i++) {
+    const bx = ((i * 280 - parallax + 1400) % 1400) - 100;
+    const bh = 80 + Math.sin(i * 1.7) * 40;
+    ctx.fillRect(bx, GROUND_Y - bh, 120, bh);
+    // Windows
+    ctx.fillStyle = 'rgba(255,240,180,0.3)';
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 4; c++)
+        ctx.fillRect(bx + 10 + c*26, GROUND_Y - bh + 12 + r*22, 14, 12);
+    ctx.fillStyle = '#6a8090';
   }
 
   // Ground
   const grd = ctx.createLinearGradient(0, GROUND_Y, 0, H);
-  grd.addColorStop(0, '#1e1408');
-  grd.addColorStop(1, '#0a0805');
+  grd.addColorStop(0, '#7aaa50');
+  grd.addColorStop(1, '#4a7030');
   ctx.fillStyle = grd;
   ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
 
-  // Ground line
-  ctx.strokeStyle = '#3a2810';
+  // Ground edge line
+  ctx.strokeStyle = '#3a6020';
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, GROUND_Y);
-  ctx.lineTo(W, GROUND_Y);
-  ctx.stroke();
-}
-
-function drawWall() {
-  const wallW = W - WALL_X;
-
-  // Wall body
-  const wg = ctx.createLinearGradient(WALL_X, 0, W, 0);
-  wg.addColorStop(0, '#2a2018');
-  wg.addColorStop(1, '#1a1408');
-  ctx.fillStyle = wg;
-  ctx.fillRect(WALL_X, WALL_TOP_Y, wallW, H - WALL_TOP_Y);
-
-  // Battlement notches
-  ctx.fillStyle = '#221a10';
-  const notchW = 22, notchH = 20, notchGap = 32;
-  for (let nx = WALL_X + 8; nx < W - 10; nx += notchGap) {
-    ctx.fillRect(nx, WALL_TOP_Y - notchH, notchW, notchH);
-  }
-
-  // Stone texture lines
-  ctx.strokeStyle = '#1a1208';
-  ctx.lineWidth = 1;
-  for (let row = 0; row < 8; row++) {
-    const ly = WALL_TOP_Y + 20 + row * 28;
-    ctx.beginPath();
-    ctx.moveTo(WALL_X, ly);
-    ctx.lineTo(W, ly);
-    ctx.stroke();
-  }
-
-  // Wall health tint (cracks)
-  if (wallHP < 60) {
-    ctx.fillStyle = `rgba(180,20,0,${(60 - wallHP) / 200})`;
-    ctx.fillRect(WALL_X, WALL_TOP_Y, wallW, H - WALL_TOP_Y);
-  }
-
-  // Cannons
-  for (const cannon of CANNONS) {
-    ctx.save();
-    ctx.fillStyle = '#302010';
-    ctx.fillRect(cannon.x - 14, cannon.y - 8, 14, 16);
-    ctx.fillStyle = '#181008';
-    ctx.fillRect(cannon.x - 22, cannon.y - 5, 12, 10);
-    ctx.restore();
-  }
+  ctx.beginPath(); ctx.moveTo(0, GROUND_Y); ctx.lineTo(W, GROUND_Y); ctx.stroke();
 }
 
 function getTargetAnchor() {
   if (state !== 'playing' || player.grappling) return null;
-  let best = null, bestDistToMouse = Infinity;
-  for (const a of ANCHORS) {
-    if (dist(player.x, player.y, a.x, a.y) > ROPE_LEN_MAX) continue;
-    const d = dist(mouse.x, mouse.y, a.x, a.y);
-    if (d < bestDistToMouse) { bestDistToMouse = d; best = a; }
+  let best = null, bestD = Infinity;
+  for (const a of anchors) {
+    if (dist(player.x, player.y, a.x, a.y) > ROPE_MAX) continue;
+    const md = dist(mouse.x, mouse.y, a.x, a.y);
+    if (md < bestD) { bestD = md; best = a; }
   }
   return best;
 }
 
 function drawAnchors() {
-  const targeted = getTargetAnchor();
+  const target = getTargetAnchor();
 
-  // Draw preview line to targeted anchor
-  if (targeted) {
+  // Reach circle — shows what the player can grab
+  if (!player.grappling) {
     ctx.beginPath();
-    ctx.moveTo(player.x, player.y);
-    ctx.lineTo(targeted.x, targeted.y);
-    ctx.strokeStyle = 'rgba(200,160,60,0.25)';
+    ctx.arc(player.x, player.y, ROPE_MAX, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
     ctx.lineWidth = 1;
-    ctx.setLineDash([4, 7]);
+    ctx.setLineDash([6, 8]);
     ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  for (const a of ANCHORS) {
-    const isActive   = player.grappling && player.anchorX === a.x && player.anchorY === a.y;
-    const isTargeted = targeted === a;
-    const r = isTargeted || isActive ? 8 : 5;
-
-    if (isTargeted) {
-      // Outer glow ring
-      ctx.beginPath();
-      ctx.arc(a.x, a.y, 16, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(240,200,80,0.1)';
-      ctx.fill();
-    }
-
+  // Preview line to targeted anchor
+  if (target) {
     ctx.beginPath();
-    ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = isActive ? '#f0c060' : isTargeted ? '#c8a040' : '#4a3820';
-    ctx.fill();
-    ctx.strokeStyle = isActive ? '#fff8c0' : isTargeted ? '#f0d060' : '#8a6840';
-    ctx.lineWidth = isTargeted || isActive ? 2 : 1.5;
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(target.x, target.y);
+    ctx.strokeStyle = 'rgba(255,220,80,0.45)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  for (const a of anchors) {
+    const inRange  = dist(player.x, player.y, a.x, a.y) <= ROPE_MAX;
+    const isActive = player.grappling && player.anchorRef === a;
+    const isTarget = target === a;
+
+    // Post
+    ctx.strokeStyle = '#7a5828';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y + 12);
+    ctx.lineTo(a.x, a.y + 58);
     ctx.stroke();
 
-    // Label on targeted
-    if (isTargeted) {
-      ctx.fillStyle = 'rgba(240,200,80,0.7)';
-      ctx.font = '10px Courier New';
-      ctx.fillText('CLICK', a.x - 13, a.y - 12);
+    // Outer pulse ring on reachable anchors
+    if (inRange && !player.grappling) {
+      const pulse = Math.sin(Date.now() / 300) * 0.3 + 0.5;
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, 22, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,220,80,${pulse * 0.5})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
-  }
-}
 
-function drawColossi() {
-  for (const c of colossi) {
-    if (c.dead) continue;
+    if (isTarget) {
+      ctx.fillStyle = 'rgba(255,220,80,0.85)';
+      ctx.font = 'bold 11px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText('HOLD TO GRAB', a.x, a.y - 20);
+      ctx.textAlign = 'left';
+    }
 
-    ctx.save();
-
-    const flash = c.hitFlash > 0 ? c.hitFlash / 6 : 0;
-
-    // Body
-    const bodyGrad = ctx.createLinearGradient(c.x, c.y, c.x + c.w, c.y + c.h);
-    bodyGrad.addColorStop(0, flash > 0 ? `rgba(255,${120-flash*80},${60-flash*60},1)` : '#4a3828');
-    bodyGrad.addColorStop(1, flash > 0 ? `rgba(200,${80-flash*60},${40-flash*40},1)` : '#2a1e14');
-    ctx.fillStyle = bodyGrad;
-    ctx.fillRect(c.x, c.y, c.w, c.h);
-
-    // Body edge
-    ctx.strokeStyle = flash > 0 ? '#e04020' : '#3a2818';
+    // Hook dot
+    const dotR = isActive ? 11 : isTarget ? 10 : inRange ? 9 : 6;
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, dotR, 0, Math.PI * 2);
+    ctx.fillStyle  = isActive ? '#fff8a0' : isTarget ? '#f0c020' : inRange ? '#d4a030' : '#6a5020';
+    ctx.fill();
+    ctx.strokeStyle = isActive ? '#ffffff' : '#e0c060';
     ctx.lineWidth = 2;
-    ctx.strokeRect(c.x, c.y, c.w, c.h);
-
-    // Head
-    const headW = c.w * 0.55;
-    const headH = c.h * 0.18;
-    const headX = c.x + (c.w - headW) / 2;
-    ctx.fillStyle = flash > 0 ? '#b03020' : '#3a2820';
-    ctx.fillRect(headX, c.y - headH, headW, headH);
-
-    // Eyes — two dim glows
-    const eyeY = c.y - headH * 0.4;
-    ctx.fillStyle = `rgba(255,180,40,${0.4 + flash * 0.4})`;
-    ctx.beginPath();
-    ctx.ellipse(headX + headW * 0.3, eyeY, 5, 3, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(headX + headW * 0.7, eyeY, 5, 3, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Weak-point glow
-    const wpX = c.x + c.w / 2 + c.wpOffX;
-    const wpY = c.y + c.wpOffY;
-    const glowR = 10 + c.wpGlow * 6;
-    const glow = ctx.createRadialGradient(wpX, wpY, 0, wpX, wpY, glowR);
-    glow.addColorStop(0, `rgba(80,230,140,${c.wpGlow * 0.9})`);
-    glow.addColorStop(0.5, `rgba(40,180,80,${c.wpGlow * 0.5})`);
-    glow.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(wpX, wpY, glowR, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(wpX, wpY, 6, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(120,255,160,${c.wpGlow})`;
-    ctx.fill();
-
-    // HP bar
-    const barW = c.w * 0.8;
-    const barX = c.x + c.w * 0.1;
-    const barY = c.y - headH - 14;
-    ctx.fillStyle = '#1a0a04';
-    ctx.fillRect(barX, barY, barW, 6);
-    const hpFrac = c.hp / c.maxHP;
-    ctx.fillStyle = hpFrac > 0.5 ? '#60a030' : hpFrac > 0.25 ? '#c08020' : '#c02010';
-    ctx.fillRect(barX, barY, barW * hpFrac, 6);
-
-    ctx.restore();
+    ctx.stroke();
   }
 }
 
-function drawCannonBalls() {
-  for (const b of cannonBalls) {
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = '#e08030';
-    ctx.fill();
-    // Trail
-    ctx.beginPath();
-    ctx.arc(b.x - b.vx * 2, b.y - b.vy * 2, 2, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(200,120,30,0.4)';
-    ctx.fill();
+function drawTitans() {
+  for (const t of titans) {
+    if (t.dead) continue;
+    const flash = t.hitFlash > 0;
+    const cx    = t.x + t.w / 2;
+    const skin  = flash ? '#a04020' : '#6a4830';
+    const dark  = flash ? '#803018' : '#4a3020';
+
+    const torsoH   = t.h * 0.52;
+    const bob      = Math.abs(Math.sin(t.walkPhase)) * 3;
+    const torsoY   = t.y + bob;
+    const hipY     = torsoY + torsoH;
+    const legH     = GROUND_Y - hipY;        // always pin feet to ground
+    const legW     = t.w * 0.21;
+    const armLen   = t.h * 0.30;
+    const armW     = t.w * 0.15;
+    const slide    = Math.sin(t.walkPhase) * t.w * 0.22;   // feet slide L/R
+    const armSwing = Math.sin(t.walkPhase) * 0.55;         // arm angle
+
+    // ── Legs: slide feet horizontally so they always touch ground ──
+    const leftLegX  = cx - legW / 2 + slide;   // left foot slides right when backward
+    const rightLegX = cx - legW / 2 - slide;   // right foot slides left when forward
+    ctx.fillStyle = dark;
+    // draw back leg first so front leg overlaps it
+    if (slide > 0) {
+      ctx.fillRect(leftLegX,  hipY, legW, legH);
+      ctx.fillRect(rightLegX, hipY, legW, legH);
+    } else {
+      ctx.fillRect(rightLegX, hipY, legW, legH);
+      ctx.fillRect(leftLegX,  hipY, legW, legH);
+    }
+
+    // ── Arms: pivot near shoulders, proper counter-swing ──────────
+    const shoulderY = torsoY + torsoH * 0.12;
+    ctx.fillStyle = skin;
+    // left arm: swings BACKWARD (clockwise) when right leg is forward
+    ctx.save();
+    ctx.translate(cx - t.w * 0.28, shoulderY);
+    ctx.rotate(armSwing);
+    ctx.fillRect(-armW / 2, 0, armW, armLen);
+    ctx.restore();
+    // right arm: swings FORWARD (counter-clockwise) when right leg is forward
+    ctx.save();
+    ctx.translate(cx + t.w * 0.28, shoulderY);
+    ctx.rotate(-armSwing);
+    ctx.fillRect(-armW / 2, 0, armW, armLen);
+    ctx.restore();
+
+    // ── Torso ─────────────────────────────────────────────────────
+    ctx.fillStyle = skin;
+    ctx.fillRect(t.x + t.w * 0.08, torsoY, t.w * 0.84, torsoH);
+    ctx.strokeStyle = dark;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(t.x + t.w * 0.08, torsoY, t.w * 0.84, torsoH);
+
+    // ── Head ──────────────────────────────────────────────────────
+    const hW = t.w * 0.58, hH = t.h * 0.14;
+    const headY  = torsoY - hH;
+    const eyeCX  = cx;
+    const eyeCY  = headY + hH * 0.5;
+    ctx.fillStyle = dark;
+    ctx.fillRect(cx - hW / 2, headY, hW, hH);
+
+    // ── Eye = weak point (pulsing green glow replaces orange eye) ──
+    t.wpY = eyeCY; // keep hit detection in sync with visual
+    const glow = Math.sin(Date.now() / 180) * 0.35 + 0.65;
+    const gr = ctx.createRadialGradient(eyeCX, eyeCY, 0, eyeCX, eyeCY, 20);
+    gr.addColorStop(0,    `rgba(80,230,140,${glow * 0.9})`);
+    gr.addColorStop(0.55, `rgba(40,180,80,${glow * 0.4})`);
+    gr.addColorStop(1,    'rgba(0,0,0,0)');
+    ctx.fillStyle = gr;
+    ctx.beginPath(); ctx.arc(eyeCX, eyeCY, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(eyeCX, eyeCY, 6, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(140,255,170,${glow})`; ctx.fill();
   }
 }
 
 function drawParticles() {
   for (const p of particles) {
-    const alpha = p.life / p.maxLife;
-    ctx.globalAlpha = alpha;
+    ctx.globalAlpha = p.life / p.maxLife;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, p.r * alpha, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, p.r * (p.life / p.maxLife), 0, Math.PI * 2);
     ctx.fillStyle = p.color;
     ctx.fill();
   }
@@ -820,148 +537,136 @@ function drawParticles() {
 }
 
 function drawPlayer() {
-  // Grapple rope
+  // Rope
   if (player.grappling) {
     ctx.beginPath();
     ctx.moveTo(player.anchorX, player.anchorY);
     ctx.lineTo(player.x, player.y);
-    ctx.strokeStyle = '#c0a060';
+    ctx.strokeStyle = '#c0a050';
     ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
+    ctx.setLineDash([5, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Anchor indicator
     ctx.beginPath();
     ctx.arc(player.anchorX, player.anchorY, 7, 0, Math.PI * 2);
-    ctx.strokeStyle = '#f0c060';
+    ctx.strokeStyle = '#f0d060';
     ctx.lineWidth = 2;
     ctx.stroke();
-  }
 
-  // Mouse direction arrow while swinging
-  if (player.grappling) {
-    const tmx = mouse.x - player.x;
-    const tmy = mouse.y - player.y;
-    const tmLen = Math.sqrt(tmx * tmx + tmy * tmy);
-    if (tmLen > 20) {
-      const nx = tmx / tmLen, ny = tmy / tmLen;
-      const arrowLen = Math.min(tmLen * 0.4, 40);
-      const ex = player.x + nx * arrowLen;
-      const ey = player.y + ny * arrowLen;
-      ctx.beginPath();
-      ctx.moveTo(player.x, player.y);
-      ctx.lineTo(ex, ey);
-      ctx.strokeStyle = 'rgba(255,220,100,0.5)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // Arrowhead
-      const perp = 5;
+    // Direction arrow from player toward mouse
+    const mx = mouse.x - player.x, my = mouse.y - player.y;
+    const ml = Math.sqrt(mx * mx + my * my);
+    if (ml > 24) {
+      const nx = mx / ml, ny = my / ml;
+      const len = Math.min(ml * 0.4, 40);
+      const ex = player.x + nx * len, ey = player.y + ny * len;
+      ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(ex, ey);
+      ctx.strokeStyle = 'rgba(255,220,100,0.55)'; ctx.lineWidth = 2; ctx.stroke();
       ctx.beginPath();
       ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - nx * 8 - ny * perp, ey - ny * 8 + nx * perp);
-      ctx.lineTo(ex - nx * 8 + ny * perp, ey - ny * 8 - nx * perp);
+      ctx.lineTo(ex - nx * 8 - ny * 5, ey - ny * 8 + nx * 5);
+      ctx.lineTo(ex - nx * 8 + ny * 5, ey - ny * 8 - nx * 5);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(255,220,100,0.5)';
-      ctx.fill();
+      ctx.fillStyle = 'rgba(255,220,100,0.55)'; ctx.fill();
     }
   }
 
   // Slash arc
   if (player.slashing) {
-    const r = slashRadius();
-    const progress = 1 - player.slashTimer / 18;
+    const prog = 1 - player.slashTimer / 16;
     ctx.beginPath();
-    ctx.arc(player.x, player.y, r, -Math.PI * 0.8 + progress * Math.PI, Math.PI * 0.2 + progress * Math.PI);
-    ctx.strokeStyle = `rgba(200,240,255,${0.9 - progress * 0.7})`;
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(player.x, player.y, r * 0.6, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(160,220,255,${0.3 - progress * 0.3})`;
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    ctx.arc(player.x, player.y, SLASH_R,
+      -Math.PI * 0.85 + prog * Math.PI,
+       Math.PI * 0.15 + prog * Math.PI);
+    ctx.strokeStyle = `rgba(200,245,255,${0.9 - prog * 0.75})`;
+    ctx.lineWidth = 3; ctx.stroke();
   }
 
-  // Body
+  // Character — side view
   ctx.save();
   ctx.translate(player.x, player.y);
 
-  // Cape/cloak
-  ctx.beginPath();
-  ctx.moveTo(-6, -4);
-  ctx.lineTo(-14, 12);
-  ctx.lineTo(0, 8);
-  ctx.closePath();
-  ctx.fillStyle = '#3a2060';
-  ctx.fill();
+  // Legs
+  ctx.fillStyle = '#3a2818';
+  ctx.fillRect(-6, 2, 5, 11);
+  ctx.fillRect(2, 2, 5, 11);
 
-  // Torso
-  ctx.fillStyle = '#c0a060';
+  // Cape
+  ctx.fillStyle = '#4a2880';
   ctx.beginPath();
-  ctx.arc(0, 0, PLAYER_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.moveTo(-8, -12); ctx.lineTo(-20, 6); ctx.lineTo(-8, 2);
+  ctx.closePath(); ctx.fill();
 
-  ctx.strokeStyle = '#f0d080';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+  // Torso / harness
+  ctx.fillStyle = '#c8a050';
+  ctx.fillRect(-7, -16, 14, 18);
+  ctx.fillStyle = '#8a6030';
+  ctx.fillRect(-5, -14, 10, 3);
+  ctx.fillRect(-5, -8,  10, 3);
 
-  // Eye
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  ctx.arc(3, -2, 2.5, 0, Math.PI * 2);
-  ctx.fill();
+  // Head
+  ctx.fillStyle = '#d4a870';
+  ctx.beginPath(); ctx.arc(1, -23, 9, 0, Math.PI * 2); ctx.fill();
+
+  // Blade when slashing
+  if (player.slashing) {
+    ctx.strokeStyle = '#d8f0ff';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(6, -10); ctx.lineTo(28, -26); ctx.stroke();
+  }
 
   ctx.restore();
 }
 
-function drawHints() {
-  if (hintTimer <= 0) return;
-  hintTimer--;
-  const alpha = Math.min(1, hintTimer / 60) * 0.85;
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(12, H - 82, 240, 76);
-  ctx.fillStyle = '#7a6a4a';
-  ctx.font = '10px Courier New';
-  ctx.fillText('CONTROLS', 22, H - 90);
-  ctx.fillStyle = '#e8d8a8';
-  ctx.font = '12px Courier New';
-  ctx.fillText('Hold click  — grapple', 22, H - 64);
-  ctx.fillText('Move mouse  — steer swing', 22, H - 46);
-  ctx.fillText('Release     — let go & fly', 22, H - 28);
-  ctx.fillText('Space       — slash weak point', 22, H - 10);
-  ctx.restore();
+// ── Game over / reset ─────────────────────────────────────
+function triggerGameOver() {
+  state = 'gameover';
+  const ov = document.getElementById('overlay');
+  document.getElementById('overlay-title').textContent = 'Fallen';
+  document.getElementById('overlay-title').className = 'color-red';
+  document.getElementById('overlay-sub').textContent = `Score: ${score}`;
+  document.getElementById('restart-btn').textContent = 'Try Again';
+  ov.classList.add('visible');
 }
 
-function drawTitle() {
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(0, 0, W, H);
+function resetGame() {
+  score = 0; lives = 3; speed = SPEED_BASE;
+  frameCount = 0; nextTitanIn = 600; screenShake = 0;
+  anchors = []; titans = []; particles = [];
+  player.x = START_X; player.y = GROUND_Y - PLAYER_R;
+  player.vx = 0; player.vy = 0;
+  player.grappling = false; player.anchorRef = null;
+  player.grounded = true; player.slashing = false;
+  document.getElementById('overlay').classList.remove('visible');
+  // Spawn opening anchors so player isn't stranded
+  anchors.push({ x: START_X + 160, y: 190 });
+  anchors.push({ x: START_X + 320, y: 150 });
+  anchors.push({ x: START_X + 480, y: 210 });
+  anchors.push({ x: START_X + 620, y: 170 });
+  updateHUD();
+  state = 'playing';
 }
 
-// ─────────────────────────────────────────────
-//  Utility
-// ─────────────────────────────────────────────
-function dist(x1, y1, x2, y2) {
-  const dx = x2 - x1, dy = y2 - y1;
-  return Math.sqrt(dx * dx + dy * dy);
-}
+document.getElementById('restart-btn').addEventListener('click', () => {
+  if (state === 'title') {
+    document.getElementById('overlay').classList.remove('visible');
+    resetGame();
+  } else {
+    resetGame();
+  }
+});
 
-// ─────────────────────────────────────────────
-//  Game loop
-// ─────────────────────────────────────────────
+// ── Loop ──────────────────────────────────────────────────
 let lastTime = 0;
-
 function loop(ts) {
   const dt = Math.min((ts - lastTime) / 1000, 0.05);
   lastTime = ts;
 
   if (state === 'playing') {
+    frameCount++;
+    updateWorld(dt);
     updatePlayer(dt);
-    updateColossi(dt);
-    updateCannons(dt);
     updateParticles(dt);
     updateHUD();
   }
@@ -970,26 +675,21 @@ function loop(ts) {
   requestAnimationFrame(loop);
 }
 
-// ─────────────────────────────────────────────
-//  Boot
-// ─────────────────────────────────────────────
+// ── Boot ──────────────────────────────────────────────────
 (function boot() {
-  resetPlayerPosition();
   state = 'title';
+  score = 0; lives = 3; speed = SPEED_BASE;
+  frameCount = 0; nextTitanIn = 600; screenShake = 0;
+  anchors = []; titans = []; particles = [];
+  player.x = START_X; player.y = GROUND_Y - PLAYER_R;
+  updateHUD();
 
-  // Show title overlay
   const ov = document.getElementById('overlay');
   document.getElementById('overlay-title').textContent = 'Colossus Break';
   document.getElementById('overlay-title').className = 'color-gold';
   document.getElementById('overlay-sub').innerHTML =
-    'Hold left-click — grapple &nbsp;|&nbsp; Move mouse — steer &nbsp;|&nbsp; Release — let go &nbsp;|&nbsp; Space — slash';
+    'Hold left-click — grapple to hook<br>Move mouse — steer your swing<br>Release — fly<br>Space — slash the glowing weak point';
   document.getElementById('restart-btn').textContent = 'Begin';
-  document.getElementById('restart-btn').onclick = function () {
-    this.textContent = 'Begin Again';
-    this.onclick = resetGame;
-    ov.classList.remove('visible');
-    resetGame();
-  };
   ov.classList.add('visible');
 
   requestAnimationFrame(loop);
