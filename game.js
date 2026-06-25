@@ -10,7 +10,7 @@ const GRAVITY      = 0.52;
 const GROUND_Y     = H - 68;
 const ROPE_MAX     = 420;
 const PLAYER_R     = 10;
-const SLASH_R      = 90;
+const SLASH_R      = 60;
 const SPEED_BASE   = 2.6;
 const SPEED_MAX    = 7.0;
 const START_X      = 210;
@@ -219,9 +219,9 @@ function updateWorld(dt) {
     }
   }
 
-  // Guarantee 2 anchors are always within grapple range ahead of the player
-  const reachable = anchors.filter(a => a.x > player.x - 50 && a.x < player.x + ROPE_MAX + 60);
-  if (reachable.length < 2) spawnAnchor();
+  // Keep 2+ anchors visible on the right half of the screen
+  const upcoming = anchors.filter(a => a.x > W * 0.5);
+  if (upcoming.length < 2) spawnAnchor();
 
   // Titan spawn timer (counts down in world-px)
   nextTitanIn -= scroll;
@@ -232,10 +232,9 @@ function updateWorld(dt) {
 }
 
 function spawnAnchor() {
-  // Spawn ahead of the player, within grapple range, at varied heights
-  const ahead = player.x + 180 + Math.random() * 200;
+  // Spawn at the right edge so they're visible immediately and scroll into reach
   anchors.push({
-    x: Math.max(ahead, player.x + 150),
+    x: W - 10 + Math.random() * 80,
     y: 110 + Math.random() * 250,
   });
 }
@@ -453,66 +452,66 @@ function drawTitans() {
     if (t.dead) continue;
     const flash = t.hitFlash > 0;
     const cx    = t.x + t.w / 2;
-    const skin  = flash ? '#a04020' : '#6a4830';
-    const dark  = flash ? '#803018' : '#4a3020';
 
-    const torsoH   = t.h * 0.52;
-    const bob      = Math.abs(Math.sin(t.walkPhase)) * 3;
-    const torsoY   = t.y + bob;
-    const hipY     = torsoY + torsoH;
-    const legH     = GROUND_Y - hipY;        // always pin feet to ground
-    const legW     = t.w * 0.21;
+    const sinP = Math.sin(t.walkPhase);
+    const bob  = Math.abs(sinP) * 2.5;
+
+    // Side-profile proportions
+    const headH    = t.h * 0.14;
+    const headW    = t.h * 0.13;
+    const torsoH   = t.h * 0.44;
+    const torsoW   = t.h * 0.17;           // narrow — we see the side
     const armLen   = t.h * 0.30;
-    const armW     = t.w * 0.15;
-    const slide    = Math.sin(t.walkPhase) * t.w * 0.22;   // feet slide L/R
-    const armSwing = Math.sin(t.walkPhase) * 0.55;         // arm angle
+    const legLen   = t.h * 0.42;
+    const limbThick = Math.max(8, t.w * 0.11);
 
-    // ── Legs: slide feet horizontally so they always touch ground ──
-    const leftLegX  = cx - legW / 2 + slide;   // left foot slides right when backward
-    const rightLegX = cx - legW / 2 - slide;   // right foot slides left when forward
-    ctx.fillStyle = dark;
-    // draw back leg first so front leg overlaps it
-    if (slide > 0) {
-      ctx.fillRect(leftLegX,  hipY, legW, legH);
-      ctx.fillRect(rightLegX, hipY, legW, legH);
-    } else {
-      ctx.fillRect(rightLegX, hipY, legW, legH);
-      ctx.fillRect(leftLegX,  hipY, legW, legH);
-    }
+    const headTopY  = t.y + bob;
+    const torsoTopY = headTopY + headH;
+    const hipY      = torsoTopY + torsoH;
+    const shoulderY = torsoTopY + torsoH * 0.08;
 
-    // ── Arms: pivot near shoulders, proper counter-swing ──────────
-    const shoulderY = torsoY + torsoH * 0.12;
-    ctx.fillStyle = skin;
-    // left arm: swings BACKWARD (clockwise) when right leg is forward
-    ctx.save();
-    ctx.translate(cx - t.w * 0.28, shoulderY);
-    ctx.rotate(armSwing);
-    ctx.fillRect(-armW / 2, 0, armW, armLen);
-    ctx.restore();
-    // right arm: swings FORWARD (counter-clockwise) when right leg is forward
-    ctx.save();
-    ctx.translate(cx + t.w * 0.28, shoulderY);
-    ctx.rotate(-armSwing);
-    ctx.fillRect(-armW / 2, 0, armW, armLen);
-    ctx.restore();
+    // Leg swing — front leg goes left (forward), back leg goes right
+    const legSwing = sinP * 0.42;
+    // Arm counter-swing — front arm goes right when front leg goes left
+    const armSwing = sinP * 0.60;
 
-    // ── Torso ─────────────────────────────────────────────────────
-    ctx.fillStyle = skin;
-    ctx.fillRect(t.x + t.w * 0.08, torsoY, t.w * 0.84, torsoH);
-    ctx.strokeStyle = dark;
+    // Helper: draw a thick rounded limb from (x,y) at angle `a`, length `len`
+    const limb = (x, y, a, len, color) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth   = limbThick;
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.sin(a) * len, y + Math.cos(a) * len);
+      ctx.stroke();
+    };
+
+    // ── Back leg (right leg, behind body — drawn first) ────────────
+    limb(cx, hipY,      legSwing,        legLen, '#3d2010');
+    // ── Back arm (behind body — drawn before torso) ────────────────
+    limb(cx, shoulderY, -armSwing + 0.3, armLen, '#3d2010');
+
+    // ── Torso block ────────────────────────────────────────────────
+    const tCol = flash ? '#a04020' : '#7a5535';
+    ctx.fillStyle = tCol;
+    ctx.fillRect(cx - torsoW / 2, torsoTopY, torsoW, torsoH);
+    ctx.strokeStyle = '#3d2010';
     ctx.lineWidth = 2;
-    ctx.strokeRect(t.x + t.w * 0.08, torsoY, t.w * 0.84, torsoH);
+    ctx.strokeRect(cx - torsoW / 2, torsoTopY, torsoW, torsoH);
 
-    // ── Head ──────────────────────────────────────────────────────
-    const hW = t.w * 0.58, hH = t.h * 0.14;
-    const headY  = torsoY - hH;
-    const eyeCX  = cx;
-    const eyeCY  = headY + hH * 0.5;
-    ctx.fillStyle = dark;
-    ctx.fillRect(cx - hW / 2, headY, hW, hH);
+    // ── Front leg (left leg, in front of body — drawn over torso) ──
+    limb(cx, hipY,      -legSwing,       legLen, '#7a5535');
+    // ── Front arm (drawn over torso) ───────────────────────────────
+    limb(cx, shoulderY,  armSwing - 0.3, armLen, '#9a6a45');
 
-    // ── Eye = weak point (pulsing green glow replaces orange eye) ──
-    t.wpY = eyeCY; // keep hit detection in sync with visual
+    // ── Head ───────────────────────────────────────────────────────
+    ctx.fillStyle = '#3d2010';
+    ctx.fillRect(cx - headW / 2, headTopY, headW, headH);
+
+    // ── Eye = weak point ────────────────────────────────────────────
+    const eyeCX = cx;
+    const eyeCY = headTopY + headH * 0.5;
+    t.wpY = eyeCY;
     const glow = Math.sin(Date.now() / 180) * 0.35 + 0.65;
     const gr = ctx.createRadialGradient(eyeCX, eyeCY, 0, eyeCX, eyeCY, 20);
     gr.addColorStop(0,    `rgba(80,230,140,${glow * 0.9})`);
